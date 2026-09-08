@@ -1,591 +1,211 @@
-# Troubleshooting Runbook - Secure Event Ticketing Platform
+# Runbook za troubleshooting — Secure Event Ticketing Platform
 
-Quick reference guide for common issues and solutions.
-
-## Issues Quick Index
-
-| Symptom | Cause | Solution |
-|---------|-------|----------|
-| Frontend won't load | API not responding | See: API Service Down |
-| Orders not processing | Worker crashed or Redis full | See: Queue Issues |
-| Database connection fails | PostgreSQL unavailable or wrong credentials | See: Database Issues |
-| High memory usage | Resource leak or under-provisioned | See: Performance Issues |
-| Pods stuck in Pending | Not enough resources | See: Cluster Issues |
+Ovaj dokument opisuje stvarne incidente koji su se dogodili tijekom lokalnog razvoja (Docker Compose) i produkcijskog deploya (Kubernetes) ove aplikacije, uključujući dijagnostiku, uzrok i konačno rješenje svakog problema. Svi incidenti su reproducirani i riješeni tijekom stvarnog rada na projektu.
 
 ---
 
-## Local Development (docker-compose)
+## Incident 1 — API kontejner "unhealthy" unatoč tome što aplikacija radi (Docker Compose)
 
-### Issue: Services fail to start
+**Simptom:**
+`docker compose up -d` javlja:
+```
+dependency failed to start: container ticketing-api is unhealthy
+```
+iako logovi kontejnera pokazuju `API listening on port 8080`, a ručni poziv na `http://localhost:8080/healthz` s hosta vraća `200 OK`.
 
-**Check logs:**
-```bash
-docker compose logs
-docker compose logs api
-docker compose logs postgres
+**Dijagnostika:**
+1. `docker inspect ticketing-api --format='{{json .State.Health}}'` pokazuje ponavljajuću grešku:
+   ```
+   "Output":"Health check exceeded timeout (3s)"
+   ```
+2. Ručno pokretanje iste Node skripte unutar kontejnera (`docker exec`) radi trenutno i bez problema.
+3. Zaključak: problem nije u aplikaciji, nego u tome kako Docker interno izvršava HEALTHCHECK naredbu.
+
+**Uzrok:**
+HEALTHCHECK naredba u Dockerfileu koristila je `http://localhost:8080/healthz`. Node.js unutar Alpine kontejnera ponekad prvo pokuša razriješiti `localhost` kao IPv6 adresu (`::1`). Ako server sluša samo na IPv4, spajanje na `::1` ne biva odmah odbijeno nego "visi" dok ne istekne definirani timeout (3s) — što izgleda kao da health check nikad ne uspijeva.
+
+**Rješenje:**
+Health check izmijenjen da koristi eksplicitnu IPv4 adresu `127.0.0.1` umjesto `localhost`, uz dodavanje eksplicitnog `process.exit()` i `.on('error', ...)` handlera:
+
+```js
+require('http').get('http://127.0.0.1:8080/healthz', (r) => {
+  process.exit(r.statusCode === 200 ? 0 : 1);
+}).on('error', () => process.exit(1));
 ```
 
-**Solution:**
-```bash
-# Stop all and restart
-docker compose down
-docker compose up -d
+Izmjena je napravljena i u `api/Dockerfile` (HEALTHCHECK direktiva) i u `docker-compose.yml` (`healthcheck.test` za servis `api`), jer je compose definicija imala prioritet nad onom iz Dockerfilea.
 
-# Or with rebuild
-docker compose down -v
-docker compose up --build
-```
-
-### Issue: Port already in use
-
-**Problem:** Error like "Address already in use"
-
-**Solution:**
-```bash
-# Change ports in .env
-POSTGRES_PORT=5433
-API_PORT=8081
-FRONTEND_PORT=3001
-
-# Or kill existing process
-lsof -i :8080
-kill -9 <PID>
-
-# Then restart
-docker compose restart
-```
-
-### Issue: Database won't initialize
-
-**Check logs:**
-```bash
-docker compose logs postgres
-```
-
-**Solution:**
-```bash
-# Reset database
-docker compose down -v
-docker compose up
-
-# Or manually reinit
-docker compose exec postgres psql -U ticketing_user -d ticketing -f /docker-entrypoint-initdb.d/init.sql
-```
-
-### Issue: Can't connect to services from host
-
-**Test connectivity:**
-```bash
-curl http://localhost:8080/healthz
-telnet localhost 5432
-redis-cli -p 6379 PING
-```
-
-**Solution:**
-```bash
-# Check docker network
-docker network inspect ticketing-network
-
-# Restart containers
-docker compose restart
-
-# Check port mappings
-docker compose ps
-```
+**Validacija:** `docker compose ps` prikazuje `ticketing-api` kao `healthy`.
 
 ---
 
-## Kubernetes Production
+## Incident 2 — Frontend ne može dohvatiti listu eventova ("Failed to fetch") (Docker Compose)
 
-### Issue: Pods not starting (CreateContainerConfigError)
-
-**Diagnose:**
-```bash
-kubectl describe pod <pod-name> -n ticketing
-kubectl logs <pod-name> -n ticketing
+**Simptom:**
+Stranica na `http://localhost:3000` prikazuje prazan dropdown za odabir eventa i grešku:
+```json
+{ "error": "Failed to initialize page", "details": "Failed to fetch" }
 ```
 
-**Common causes and fixes:**
-
-**1. Secret not found**
-```bash
-# Check if secret exists
-kubectl get secrets -n ticketing
-
-# If missing, create it
-kubectl create secret generic ticketing-credentials \
-  --from-literal=POSTGRES_USER=user \
-  --from-literal=POSTGRES_PASSWORD=pass \
-  -n ticketing
-```
-
-**2. ConfigMap not found**
-```bash
-# Check configmaps
-kubectl get configmaps -n ticketing
-
-# Apply if missing
-kubectl apply -f k8s/base/deployment.yaml
-```
-
-**3. Image pull error**
-```bash
-# Check image exists
-docker images | grep ticketing
-
-# Or in registry
-curl -s https://registry.example.com/v2/ticketing/api/tags/list
-
-# Solution: Build and push image
-docker compose build
-docker tag default-api:latest registry.example.com/ticketing/api:1.0.0
-docker push registry.example.com/ticketing/api:1.0.0
-
-# Update deployment
-kubectl set image deployment/api api=registry.example.com/ticketing/api:1.0.0 -n ticketing
-```
-
-### Issue: Pod stuck in CrashLoopBackOff
-
-**Check logs:**
-```bash
-kubectl logs -f <pod-name> -n ticketing --tail=100
-```
-
-**Common causes:**
-
-**1. Application error**
-- Check logs for stack trace
-- Fix code and redeploy
-```bash
-# Redeploy
-kubectl rollout restart deployment/api -n ticketing
-```
-
-**2. Dependency unavailable**
-```bash
-# Check if postgres is ready
-kubectl exec deployment/api -n ticketing -- sh -c 'nc -zv postgres 5432'
-
-# Check if redis is ready
-kubectl exec deployment/api -n ticketing -- sh -c 'nc -zv redis 6379'
-
-# Restart dependencies first
-kubectl rollout restart deployment/postgres -n ticketing
-kubectl rollout restart deployment/redis -n ticketing
-
-# Then restart app
-kubectl rollout restart deployment/api -n ticketing
-```
-
-**3. Resource limit exceeded**
-```bash
-# Check memory usage
-kubectl top pods -n ticketing
-
-# Increase limits
-kubectl set resources deployment/api \
-  --limits=memory=1Gi,cpu=2 \
-  --requests=memory=512Mi,cpu=1 \
-  -n ticketing
-
-# Restart
-kubectl rollout restart deployment/api -n ticketing
-```
-
-### Issue: Persistent Volume stuck in Pending
-
-**Check:**
-```bash
-kubectl get pvc -n ticketing
-kubectl describe pvc postgres-pvc -n ticketing
-```
-
-**Solution:**
-
-**1. Storage class missing**
-```bash
-# List storage classes
-kubectl get storageclass
-
-# If none, create default
-kubectl apply -f - <<EOF
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: standard
-provisioner: kubernetes.io/generic-storage
-EOF
-```
-
-**2. Node disk full**
-```bash
-# Check node disk usage
-kubectl describe node
-
-# Free space:
-# - Delete old pods/images
-# - Scale down applications temporarily
-# - Add more nodes
-```
-
-**3. Storage provisioner unavailable**
-```bash
-# Check provisioner status
-kubectl get deployment -n kube-system
-
-# For EBS/EFS/GCE provisioner, ensure it's running
-kubectl logs -n kube-system <provisioner-pod>
-```
-
-### Issue: API returns 503 Service Unavailable
-
-**Diagnose readiness:**
-```bash
-kubectl exec deployment/api -n ticketing -- \
-  wget -O- http://localhost:8080/readyz
-```
-
-**Common causes:**
-
-**1. Database down**
-```bash
-# Check postgres
-kubectl get pods -l app=postgres -n ticketing
-
-# Check logs
-kubectl logs deployment/postgres -n ticketing
-
-# Restart
-kubectl rollout restart deployment/postgres -n ticketing
-```
-
-**2. Redis down**
-```bash
-# Check redis
-kubectl exec deployment/redis -n ticketing -- redis-cli PING
-
-# Restart if needed
-kubectl rollout restart deployment/redis -n ticketing
-```
-
-**3. Network connectivity**
-```bash
-# From API pod, test both
-kubectl exec deployment/api -n ticketing -- sh -c 'nc -zv postgres 5432'
-kubectl exec deployment/api -n ticketing -- sh -c 'nc -zv redis 6379'
-
-# If fails, check network policies
-kubectl get networkpolicies -n ticketing
-```
-
-### Issue: Orders stuck in "queued" status
-
-**Check worker status:**
-```bash
-# Worker pods running?
-kubectl get pods -l app=worker -n ticketing
-
-# Worker logs
-kubectl logs -l app=worker -n ticketing --tail=50
-```
-
-**Check Redis queue:**
-```bash
-# Queue length
-kubectl exec deployment/redis -n ticketing -- \
-  redis-cli LLEN ticket_orders
-
-# Peek at queue
-kubectl exec deployment/redis -n ticketing -- \
-  redis-cli LPOP ticket_orders
-```
-
-**Solutions:**
-
-**1. Scale up workers**
-```bash
-kubectl scale deployment worker --replicas=5 -n ticketing
-
-# Monitor
-watch kubectl exec deployment/redis -n ticketing -- redis-cli LLEN ticket_orders
-
-# Scale back
-kubectl scale deployment worker --replicas=2 -n ticketing
-```
-
-**2. Worker crashing**
-```bash
-kubectl describe pod -l app=worker -n ticketing
-kubectl logs -l app=worker -n ticketing
-```
-
-**3. Database connection issue**
-```bash
-# Check if table exists
-kubectl exec deployment/postgres -n ticketing -- \
-  psql -U ticketing_user -d ticketing -c "\\dt"
-
-# Check permissions
-kubectl exec deployment/postgres -n ticketing -- \
-  psql -U ticketing_user -d ticketing -c "SELECT * FROM ticket_orders LIMIT 1;"
-```
-
-### Issue: Out of memory (OOMKilled)
-
-**Check resource usage:**
-```bash
-kubectl top pods -n ticketing
-
-# Check limits
-kubectl get pods -o json -n ticketing | \
-  jq '.items[] | {name: .metadata.name, limits: .spec.containers[].resources.limits}'
-```
-
-**Solution:**
-
-**1. Increase limits**
-```bash
-kubectl set resources deployment/api \
-  --limits=memory=1Gi,cpu=2000m \
-  --requests=memory=512Mi,cpu=1000m \
-  -n ticketing
-```
-
-**2. Optimize code**
-- Check for memory leaks
-- Profile application
-- Reduce dataset size
-
-**3. Scale horizontally**
-```bash
-kubectl scale deployment api --replicas=5 -n ticketing
-```
-
-### Issue: High latency / slow requests
-
-**Profile:**
-```bash
-# Time a request
-time curl http://localhost:8080/events
-
-# Check metrics
-kubectl top pods -n ticketing
-kubectl top nodes
-
-# Check network
-kubectl describe networkpolicies -n ticketing
-```
-
-**Solutions:**
-
-**1. Database slow queries**
-```bash
-# Enable slow query log
-kubectl exec deployment/postgres -n ticketing -- \
-  psql -U ticketing_user -d ticketing -c \
-  "ALTER SYSTEM SET log_min_duration_statement = 1000;"
-
-# Restart postgres
-kubectl rollout restart deployment/postgres -n ticketing
-
-# Check logs
-kubectl logs deployment/postgres -n ticketing | grep duration
-```
-
-**2. Add caching**
-- Implement Redis caching in API
-- Cache frequently accessed data
-
-**3. Scale up**
-```bash
-kubectl scale deployment api --replicas=5 -n ticketing
-```
-
-### Issue: Frontend can't reach API
-
-**Test connectivity from frontend pod:**
-```bash
-kubectl exec deployment/frontend -n ticketing -- \
-  curl http://api:8080/events
-
-# If fails, check DNS
-kubectl exec deployment/frontend -n ticketing -- \
-  nslookup api
-
-# Check network policy
-kubectl get networkpolicies -n ticketing
-```
-
-**Solution:**
-
-**1. Update API_BASE_URL**
-```bash
-kubectl patch configmap ticketing-config -n ticketing \
-  -p '{"data":{"API_BASE_URL":"http://api:8080"}}'
-
-# Restart frontend
-kubectl rollout restart deployment/frontend -n ticketing
-```
-
-**2. Fix network policy**
-```bash
-# Check if ingress to API is allowed
-kubectl describe networkpolicies -n ticketing
-
-# Apply fix
-kubectl apply -f k8s/base/ingress-and-netpolicy.yaml
-
-# Restart pods
-kubectl rollout restart deployment/frontend -n ticketing
-```
-
-### Issue: Rolling update fails
-
-**Check rollout status:**
-```bash
-kubectl rollout status deployment/api -n ticketing
-
-# Check pod events
-kubectl describe pod -l app=api -n ticketing
-```
-
-**Solution: Rollback**
-```bash
-# Immediate rollback
-kubectl rollout undo deployment/api -n ticketing
-
-# Monitor
-kubectl rollout status deployment/api -n ticketing
-
-# Check if working
-curl http://localhost:8080/healthz
-```
-
-**Solution: Manual intervention**
-```bash
-# Scale old replica set
-kubectl get rs -n ticketing
-kubectl scale rs/api-xxxxx --replicas=3 -n ticketing
-
-# Scale new one to 0
-kubectl scale rs/api-yyyyy --replicas=0 -n ticketing
-```
+**Dijagnostika:**
+1. Chrome DevTools → Console prikazuje:
+   ```
+   api:8080/events:1  Failed to load resource: net::ERR_NAME_NOT_RESOLVED
+   ```
+2. Frontend server ima endpoint `/config` koji vraća `apiBaseUrl` iz env varijable `API_BASE_URL`.
+3. Ta varijabla je u `docker-compose.yml` postavljena na `http://api:8080` — ispravno za komunikaciju **između kontejnera** unutar Docker mreže, ali klijentski JavaScript kod izvršava se u **browseru na hostu**, koji hostname `api` ne može razriješiti.
+
+**Uzrok:**
+Miješanje dvije razine mreže: interna Docker Compose mreža (gdje `api` postoji kao DNS ime) i host mreža (gdje browser radi i gdje `api` ne postoji).
+
+**Rješenje:**
+Promijenjena vrijednost `API_BASE_URL` za `frontend` servis u `docker-compose.yml` na `http://localhost:8080`, budući da API port (`8080`) izlazi na host preko `ports:` mapiranja.
+
+**Validacija:** Dropdown na `http://localhost:3000` popunjen eventima; kupnja karte vraća `{"message": "Order queued", "orderId": "..."}`.
 
 ---
 
-## Data Recovery
+## Incident 3 — Kubernetes pods u `ErrImagePull` / `ImagePullBackOff`
 
-### Backup Database
+**Simptom:**
+Nakon `kubectl apply -f k8s/base/deployment.yaml`, pods za `api`, `frontend` i `worker` ostaju u statusu `ErrImagePull` / `ImagePullBackOff`.
 
-```bash
-# Quick backup
-kubectl exec deployment/postgres -n ticketing -- \
-  pg_dump -U ticketing_user -d ticketing > backup.sql
-
-# Scheduled backup (CronJob)
-kubectl apply -f - <<EOF
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: postgres-backup
-  namespace: ticketing
-spec:
-  schedule: "0 2 * * *"  # 2 AM daily
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-          - name: backup
-            image: postgres:16-alpine
-            command:
-            - sh
-            - -c
-            - pg_dump -U \$POSTGRES_USER -d \$POSTGRES_DB | gzip > /backups/backup-\$(date +%s).sql.gz
-            env:
-            - name: PGHOST
-              value: postgres
-            - name: POSTGRES_USER
-              valueFrom:
-                secretKeyRef:
-                  name: ticketing-credentials
-                  key: POSTGRES_USER
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: ticketing-credentials
-                  key: POSTGRES_PASSWORD
-            - name: POSTGRES_DB
-              value: ticketing
-            volumeMounts:
-            - name: backup
-              mountPath: /backups
-          volumes:
-          - name: backup
-            persistentVolumeClaim:
-              claimName: backup-pvc
-          restartPolicy: OnFailure
-EOF
+**Dijagnostika:**
 ```
+kubectl get deployment api -n ticketing -o jsonpath="{.spec.template.spec.containers[0].image}"
+→ ticketing-api:latest
 
-### Restore Database
-
-```bash
-# From backup file
-kubectl exec -i deployment/postgres -n ticketing -- \
-  psql -U ticketing_user -d ticketing < backup.sql
-
-# Verify
-kubectl exec deployment/postgres -n ticketing -- \
-  psql -U ticketing_user -d ticketing -c "SELECT COUNT(*) FROM ticket_orders;"
+kubectl get deployment api -n ticketing -o jsonpath="{.spec.template.spec.containers[0].imagePullPolicy}"
+→ Always
 ```
+Lokalno izgrađene slike (preko `docker compose build`) imale su naziv `devopsproject-api:latest` (Docker Compose imenuje slike po nazivu direktorija projekta), dok su K8s manifesti očekivali `ticketing-api:latest`. Uz to, `imagePullPolicy: Always` je tjerao Kubernetes da uvijek pokuša povući sliku s udaljenog registryja, čak i kad bi lokalna slika s odgovarajućim imenom postojala.
+
+**Uzrok:**
+Nepodudaranje naziva slika između build procesa (Compose) i deployment manifesta (K8s), u kombinaciji s pull policyjem koji ignorira lokalni cache.
+
+**Rješenje:**
+1. Označene postojeće lokalne slike novim imenima koje manifest očekuje:
+   ```
+   docker tag devopsproject-api:latest ticketing-api:latest
+   docker tag devopsproject-frontend:latest ticketing-frontend:latest
+   docker tag devopsproject-worker:latest ticketing-worker:latest
+   ```
+2. Promijenjen `imagePullPolicy` u `deployment.yaml` s `Always` na `IfNotPresent` za sva tri servisa.
+3. Primijenjen ažurirani manifest i restartani deploymenti.
+
+**Validacija:** `kubectl get pods -n ticketing` prikazuje sve pods u statusu `Running`.
+
+**Napomena za produkciju:** U pravom produkcijskom okruženju slike bi trebale biti objavljene u pravi container registry (npr. GitHub Container Registry, Docker Hub, ili privatni registry), s konzistentnim imenovanjem i verzioniranim tagovima — `imagePullPolicy: IfNotPresent` na lokalnom Docker Desktop klasteru je prihvatljivo za razvojno/testno okruženje, ali ne zamjenjuje pravi image pipeline.
 
 ---
 
-## Performance Tuning
+## Incident 4 — PostgreSQL pod u `CrashLoopBackOff` s greškom "Operation not permitted"
 
-### Database Optimization
-
-```bash
-# Analyze tables
-kubectl exec deployment/postgres -n ticketing -- \
-  psql -U ticketing_user -d ticketing -c "ANALYZE;"
-
-# Check index usage
-kubectl exec deployment/postgres -n ticketing -- \
-  psql -U ticketing_user -d ticketing -c \
-  "SELECT * FROM pg_stat_user_indexes WHERE idx_scan = 0;"
-
-# Reindex if needed
-kubectl exec deployment/postgres -n ticketing -- \
-  psql -U ticketing_user -d ticketing -c "REINDEX DATABASE ticketing;"
+**Simptom:**
+Pod `postgres-*` u Kubernetesu neprestano pada. Logovi pokazuju:
+```
+chmod: /var/lib/postgresql/data: Operation not permitted
+chmod: /var/run/postgresql: Operation not permitted
+initdb: error: could not change permissions of directory "/var/lib/postgresql/data": Operation not permitted
 ```
 
-### Redis Optimization
+**Dijagnostika:**
+1. Deployment ima ispravno definiran `securityContext` (`runAsUser: 999`, `fsGroup: 999`), što bi na standardnom Kubernetesu trebalo osigurati ispravno vlasništvo volumena.
+2. `kubectl get pvc -n ticketing` i `kubectl get pv` potvrđuju da se koristi `standard` StorageClass, koji na Docker Desktop Kubernetesu koristi `hostpath` provisioner.
+3. Poznato ograničenje: `hostpath` volumeni na Docker Desktopu (posebno na Windows hostu) ne poštuju uvijek `fsGroup` postavku ispravno, pa proces koji radi kao non-root korisnik (999) nema dozvolu mijenjati vlasništvo/dozvole direktorija koji je montiran s pogrešnim vlasnikom (obično root).
 
-```bash
-# Check memory usage
-kubectl exec deployment/redis -n ticketing -- \
-  redis-cli INFO memory
+**Uzrok:**
+Ograničenje `hostpath` storage provisionera na Docker Desktop Kubernetesu — `fsGroup` iz `securityContext` ne primjenjuje se pouzdano na takve volumene.
 
-# Clear expired keys
-kubectl exec deployment/redis -n ticketing -- \
-  redis-cli FLUSHDB
+**Rješenje:**
+Dodan `initContainer` u `postgres` deployment koji radi **kao root** (`runAsUser: 0`) prije glavnog kontejnera, i ručno postavlja ispravno vlasništvo i dozvole na direktorij prije nego glavni PostgreSQL proces (koji radi kao user 999) pokuša pisati u njega:
 
-# Persistence check
-kubectl exec deployment/redis -n ticketing -- \
-  redis-cli LASTSAVE
+```yaml
+initContainers:
+- name: fix-permissions
+  image: busybox:1.36
+  command: ["sh", "-c", "chown -R 999:999 /var/lib/postgresql/data && chmod -R 700 /var/lib/postgresql/data"]
+  volumeMounts:
+  - mountPath: /var/lib/postgresql/data
+    name: postgres-storage
+    subPath: postgres
+  securityContext:
+    runAsUser: 0
 ```
+
+**Validacija:** `kubectl get pods -n ticketing` prikazuje `postgres` pod u statusu `1/1 Running` bez restartova.
+
+**Napomena za produkciju:** Na pravom produkcijskom Kubernetes/OpenShift klasteru (s odgovarajućim CSI storage driverom, npr. AWS EBS, Azure Disk, ili OpenShift-ov default storage), `fsGroup` obično radi ispravno bez potrebe za ovim workaroundom. Ovaj initContainer je zadržan kao dodatna zaštita koja ne šteti ni u okruženjima gdje `fsGroup` radi ispravno.
 
 ---
 
-## Escalation Path
+## Incident 5 — API pod ne može razriješiti Redis hostname (`getaddrinfo EAI_AGAIN redis`)
 
-1. **Developer:** Check logs, restart pods, basic debugging
-2. **DevOps Engineer:** Investigate infrastructure, scaling, networking
-3. **DBA:** Database performance, backup/restore, schema optimization
-4. **Security Team:** For security incidents or breach investigations
-5. **Incident Commander:** For P1 incidents affecting production
+**Simptom:**
+Nakon što su postgres i imagePull problemi riješeni, `api` pod i dalje pada u `CrashLoopBackOff`. Logovi pokazuju:
+```
+Redis error: Connection timeout
+Redis error: getaddrinfo EAI_AGAIN redis
+```
 
-**Contact:** On-call rotation via PagerDuty
+**Dijagnostika:**
+1. `kubectl get svc -n ticketing` potvrđuje da servis `redis` postoji s ispravnim imenom, ClusterIP-om i portom.
+2. `kubectl get networkpolicy -n ticketing` prikazuje sve očekivane politike, uključujući `allow-dns-egress`.
+3. `kubectl describe networkpolicy allow-dns-egress -n ticketing` pokazuje da politika dopušta DNS promet (port 53/UDP) samo prema namespaceu koji ima label `name=kube-system`.
+4. `kubectl get namespace kube-system --show-labels` pokazuje da `kube-system` namespace ima label `kubernetes.io/metadata.name=kube-system`, ali **ne** i `name=kube-system`.
+
+**Uzrok:**
+NetworkPolicy je pisan s pretpostavkom da svaki namespace ima label `name=<namespace>`, što je uobičajena konvencija na nekim distribucijama Kubernetesa, ali nije zajamčeno na svima. Na Docker Desktop Kubernetesu `kube-system` po defaultu nema taj label, samo standardni `kubernetes.io/metadata.name`. Posljedično, `allow-dns-egress` politika nikad nije odgovarala `kube-system` namespaceu, pa je sav DNS promet (uključujući razrješavanje internih servisnih imena poput `redis`) bio blokiran za sve pods u `ticketing` namespaceu koji podliježu default-deny politici.
+
+**Rješenje:**
+Ručno dodan label koji politika očekuje:
+```
+kubectl label namespace kube-system name=kube-system
+```
+Zatim restartani pogođeni deploymenti (`api`) da ponovno pokušaju DNS lookup.
+
+**Validacija:** `kubectl logs <api-pod>` više ne prikazuje Redis greške; `kubectl get pods -n ticketing` prikazuje sve api pods kao `1/1 Running`.
+
+**Napomena za produkciju:** Ovo je važan nalaz za bilo koji klaster koji koristi NetworkPolicy temeljen na `namespaceSelector` s labelom `name=...` — potrebno je unaprijed provjeriti (ili eksplicitno postaviti) da target namespace doista ima taj label, umjesto pretpostavljati da ga svaka K8s distribucija automatski dodjeljuje.
+
+---
+
+## Incident 6 — Frontend u Kubernetesu ne može dohvatiti evente (identičan simptom kao Incident 2, drugi uzrok)
+
+**Simptom:**
+Nakon uspješnog port-forwardanja (`kubectl port-forward svc/frontend 3000:3000` i `svc/api 8080:8080`), stranica na `http://localhost:3000` ponovno prikazuje:
+```json
+{ "error": "Failed to initialize page", "details": "Failed to fetch" }
+```
+s istom greškom u konzoli: `api:8080/events — ERR_NAME_NOT_RESOLVED`.
+
+**Dijagnostika:**
+1. `kubectl get deployment frontend -n ticketing -o jsonpath="{.spec.template.spec.containers[0].env}"` pokazuje da `API_BASE_URL` dolazi iz ConfigMapa `ticketing-config`.
+2. `kubectl get configmap ticketing-config -n ticketing -o jsonpath="{.data.API_BASE_URL}"` vraća `http://api:8080` — interni K8s DNS naziv servisa, koji (isto kao u Incidentu 2) browser na hostu ne može razriješiti kad se pristupa preko port-forwarda.
+
+**Uzrok:**
+Isti konceptualni problem kao Incident 2 (miješanje interne mrežne adrese s adresom dostupnom klijentu), ali ovaj put na razini Kubernetes ConfigMapa umjesto Docker Compose environment varijable.
+
+**Rješenje:**
+Ažurirana vrijednost u ConfigMapu:
+```
+kubectl patch configmap ticketing-config -n ticketing --type merge -p '{"data":{"API_BASE_URL":"http://localhost:8080"}}'
+```
+Zatim restartan `frontend` deployment da povuče novu vrijednost (ConfigMap izmjene ne primjenjuju se automatski na već pokrenute pods):
+```
+kubectl rollout restart deployment frontend -n ticketing
+```
+
+**Validacija:** Uz aktivan `kubectl port-forward svc/api 8080:8080 -n ticketing` u zasebnom terminalu, stranica na `http://localhost:3000` uspješno prikazuje listu eventova i omogućuje kupnju karte.
+
+**Napomena za produkciju:** Ovaj problem ne bi postojao u pravom produkcijskom scenariju gdje frontend poslužuje statične datoteke, a JavaScript u browseru pristupa API-ju preko javno izloženog Ingress/Route hostname-a (npr. `https://api.ticketing.example.com`) umjesto internog servisnog imena. `API_BASE_URL` treba biti okolišno-specifičan: interni DNS naziv za server-to-server pozive, javni hostname za sve adrese koje se šalju klijentskom (browser) kodu.
+
+---
+
+## Opći zaključci i preporuke
+
+1. **Uvijek razlikovati "internu" i "eksternu" mrežnu adresu.** Varijable poput `API_BASE_URL` koje se koriste u kodu koji se izvršava u browseru moraju sadržavati adresu dostupnu klijentu, ne internu Docker/K8s mrežnu adresu — čak i ako je ta varijabla ispravna za server-to-server komunikaciju.
+2. **Health check naredbe unutar kontejnera trebaju koristiti eksplicitne IPv4 adrese** (`127.0.0.1`) umjesto `localhost`, radi izbjegavanja IPv6 rezolucijskih kašnjenja u minimalnim (Alpine) slikama.
+3. **Nazivi Docker slika moraju biti usklađeni** između build alata (Docker Compose) i deployment manifesta (Kubernetes) — po mogućnosti kroz zajednički CI/CD pipeline koji gradi i tagira slike jednoznačno, umjesto ručnog imenovanja.
+4. **NetworkPolicy pravila temeljena na namespace labelima zahtijevaju provjeru** da ciljani namespace doista ima očekivani label — ne pretpostavljati da svaka K8s distribucija automatski dodjeljuje label `name=<namespace>`.
+5. **Permission problemi na perzistentnim volumenima** su čest izazov na lokalnim/hostpath-based storage rješenjima; `initContainer` koji eksplicitno postavlja vlasništvo prije starta glavne aplikacije je robusno i prenosivo rješenje koje radi bez obzira na ponašanje `fsGroup`-a na danom storage provисioneru.
