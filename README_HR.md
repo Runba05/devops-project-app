@@ -1,6 +1,6 @@
 # Sigurna platforma za prodaju karata - Lokalni razvoj
 
-> Uzorni projekt za kolegij **Uvod u DevOps - DevSecOps** na Sveučilištu Algebra Bernays, Zagreb
+> Projekt za kolegij **Uvod u DevOps - DevSecOps** na Sveučilištu Algebra Bernays, Zagreb
 
 ## Pregled projekta
 
@@ -15,32 +15,30 @@ Ovo je multi-tier aplikacija za upravljanje prodajom karata za događaje sa slje
 ## Arhitektura
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   Frontend (Node.js/Express)                │
-│                     Port 3000 - Web sučelje                  │
-└────────────────┬────────────────────────────────────────────┘
-                 │ HTTP/REST
-                 ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   API (Node.js/Express)                     │
-│              Port 8080 - REST endpointi                      │
-└─────┬──────────────────────────────┬────────────────────────┘
-      │                              │
-      ▼                              ▼
+┌──────────────────────────────────────────────────────────┐
+│                   Frontend (Node.js/Express)              │
+│                     Port 3000 - Web sučelje                │
+└─────────────────┬──────────────────────────────────────────┘
+                   │ HTTP/REST
+                   ▼
+┌──────────────────────────────────────────────────────────┐
+│                   API (Node.js/Express)                   │
+│              Port 8080 - REST endpointi                    │
+└──────┬──────────────────────────────┬──────────────────────┘
+       │                              │
+       ▼                              ▼
 ┌──────────────────┐        ┌──────────────────┐
-│   PostgreSQL     │        │     Redis        │
-│   Port 5432      │        │   Port 6379      │
-│   Pohrana        │        │  Red + Cache     │
-└──────────────────┘        └──────────────────┘
-      ▲                              ▲
-      │                              │
-      └──────────────┬───────────────┘
-                     │
-                     ▼
-        ┌──────────────────────────┐
-        │  Worker (Node.js)        │
-        │  Obrada redoslijeda      │
-        └──────────────────────────┘
+│   PostgreSQL      │        │     Redis        │
+│   Port 5432        │        │   Port 6379      │
+│   Pohrana          │        │  Red + Cache     │
+└──────────┬─────────┘        └─────────┬─────────┘
+           │                            │
+           └────────────┬───────────────┘
+                         ▼
+              ┌────────────────────────┐
+              │  Worker (Node.js)      │
+              │  Obrada redoslijeda    │
+              └────────────────────────┘
 ```
 
 ## Brzi početak
@@ -55,7 +53,7 @@ Ovo je multi-tier aplikacija za upravljanje prodajom karata za događaje sa slje
 
 1. **Kloniraj repozitorij:**
    ```bash
-   git clone https://github.com/matej-basic/devops-project-app.git
+   git clone https://github.com/Runba05/devops-project-app.git
    cd devops-project-app
    ```
 
@@ -73,7 +71,7 @@ Aplikacija je dostupna na:
 - **Frontend UI:** http://localhost:3000
 - **API:** http://localhost:8080
 
-##验证funkcioniranja
+## Provjera funkcioniranja
 
 ### Health provjere
 
@@ -85,16 +83,6 @@ curl http://localhost:8080/healthz
 Odgovor:
 ```json
 {"status": "ok", "service": "api"}
-```
-
-```bash
-# API je spreman (sve zavisnosti dostupne)
-curl http://localhost:8080/readyz
-```
-
-Odgovor:
-```json
-{"status": "ready"}
 ```
 
 ### Pregled događaja
@@ -173,7 +161,7 @@ Odgovor:
 2. Odaberi događaj iz padajućeg izbornika
 3. Unesi email adresu
 4. Unesi broj karata
-5. Klikni **Kupite**
+5. Klikni **Purchase**
 6. Vidi potvrdu s ID-om narudžbe
 
 ## Konfiguracija okruženja
@@ -204,25 +192,15 @@ QUEUE_NAME=ticket_orders
 NODE_ENV=development
 ```
 
-### Promjena konfiguracije
-
-```bash
-# Promijeni port ako je već zauzet
-POSTGRES_PASSWORD=moja_lozinka docker compose up
-```
-
 ## Upravljanje servisima
 
 ### Pokretanje
 
 ```bash
 # Pokreni s gradnjom (prvi put ili nakon promjena u Dockerfile)
-docker compose up --build
+docker compose up --build -d
 
 # Pokreni bez gradnje (brže)
-docker compose up
-
-# Pokreni u pozadini
 docker compose up -d
 ```
 
@@ -235,7 +213,7 @@ docker compose stop
 # Zaustavi i ukloni kontejnere (volumeni ostaju)
 docker compose down
 
-# Potpuna čišćenja (uklanja i volumene)
+# Potpuno čišćenje (uklanja i volumene)
 docker compose down -v
 ```
 
@@ -255,7 +233,7 @@ docker compose logs postgres
 
 ## Hot-reload za razvoj
 
-Projekat je konfiguriran za automatsko osvježavanje kod promjena:
+Projekt je konfiguriran za automatsko osvježavanje koda pri promjenama:
 
 ```yaml
 volumes:
@@ -263,7 +241,7 @@ volumes:
   - /app/node_modules         # Sprječava prepletanje
 ```
 
-Kada napraviš promjene u `api/src/`, `frontend/src/` ili `worker/src/`, aplikacija će se automatski restartati zahvaljujući `nodemon`.
+Kada se naprave promjene u `api/src/`, `frontend/src/` ili `worker/src/`, aplikacija se automatski restarta zahvaljujući `nodemon`.
 
 ## Trajnost podataka
 
@@ -279,12 +257,14 @@ Kada napraviš promjene u `api/src/`, `frontend/src/` ili `worker/src/`, aplikac
 docker compose down -v
 
 # Ponovno pokretanje s novom bazom
-docker compose up
+docker compose up -d
 ```
 
 ## Troubleshooting
 
-### Servisi se ne pokreću
+Za detaljnu dijagnostiku i rješenja stvarnih problema na koje se naišlo tijekom razvoja ovog projekta (health check timeout, mrežni problemi, konfiguracija API adrese), pogledati `docs/TROUBLESHOOTING.md`.
+
+Osnovne dijagnostičke naredbe:
 
 ```bash
 # Provjeri logove
@@ -295,7 +275,10 @@ docker compose restart
 
 # Potpuni restart
 docker compose down -v
-docker compose up --build
+docker compose up --build -d
+
+# Provjeri mrežu
+docker network inspect ticketing-network
 ```
 
 ### Port već korišten
@@ -306,88 +289,22 @@ API_PORT=8081
 FRONTEND_PORT=3001
 POSTGRES_PORT=5433
 
-# Ili ubij proces na portu
-# Linux/macOS
-lsof -i :8080
-kill -9 <PID>
-
-# Windows
+# Ili pronađi i ugasi proces na portu (Windows)
 netstat -ano | findstr :8080
 taskkill /PID <PID> /F
 ```
 
-### Baza se ne inicijalizira
-
-```bash
-# Vidi PostgreSQL logove
-docker compose logs postgres
-
-# Resetiraj i pokušaj ponovno
-docker compose down -v
-docker compose up
-```
-
-### Redis veza ne radi
-
-```bash
-# Restart Redis
-docker compose restart redis
-
-# Provjeri logove
-docker compose logs redis
-```
-
-### Kontejneri se često ne poklapaju s lokalnom mrežom
-
-```bash
-# Provjeri mrežu
-docker network inspect ticketing-network
-
-# Restart svih servisa
-docker compose restart
-
-# Provjeri portove
-docker compose ps
-```
-
 ## Sigurnosne karakteristike (lokalni razvoj)
 
-- ✅ Korisnik koji nije root (UID 1001) u svim kontejnerima
-- ✅ Multi-stage Docker gradnje (smanjeni redak slika)
-- ✅ Health provjere za sve servise
-- ✅ Tajne u `.env` datoteci (ne u kodu)
-- ✅ Mrežna izolacija preko Docker mostu
-- ⚠️ Napomena: Lokalni `.env` ima zadanu lozinku - nikada ne koristiti u produkciji!
+- Korisnik koji nije root (UID 1001) u svim Node.js kontejnerima
+- Multi-stage Docker gradnje (smanjena veličina slika)
+- Health provjere za sve servise
+- Tajne u `.env` datoteci (nisu hardkodirane u kodu)
+- Mrežna izolacija preko Docker mosta
 
-## Savjeti za performanse
-
-1. **Koristiti nazvane volumene za bazu:**
-   - Brže od bind mountova na Docker Desktop za macOS/Windows
-   - Već konfigurirano u `docker-compose.yml`
-
-2. **Onemogućiti hot-reload ako nije potreban:**
-   ```bash
-   docker compose up --no-build
-   ```
-
-3. **Nadgledati potrošnju resursa:**
-   ```bash
-   docker stats
-   ```
+**Napomena:** Lokalni `.env` ima zadanu lozinku iz `.env.example` — nikada ne koristiti tu vrijednost u produkciji.
 
 ## Sljedeći koraci
 
-- **Produkcija:** Vidi [`docs/PRODUCTION_DEPLOYMENT_HR.md`](docs/PRODUCTION_DEPLOYMENT_HR.md)
-- **Sigurnost:** Vidi [`docs/security/IMAGE_SCAN_REPORT.md`](docs/security/IMAGE_SCAN_REPORT.md)
-- **CI/CD:** Vidi [`.github/workflows/`](.github/workflows/)
-
-## Kontakt i podrška
-
-Za pitanja o lokalnom razvoju:
-1. Provjeri logove: `docker compose logs`
-2. Vidi troubleshooting sekciju gore
-3. Kontaktiraj na email institucije
-
----
-
-**Status:** ✅ Spreman za lokalni razvoj
+- **Produkcija (Kubernetes):** vidi [`PRODUCTION_DEPLOYMENT_HR.md`](PRODUCTION_DEPLOYMENT_HR.md)
+- **Rješavanje problema:** vidi [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
