@@ -96,6 +96,16 @@ spec:
     spec:
       securityContext:
         fsGroup: 999
+      initContainers:
+      - name: fix-permissions
+        image: busybox:1.36
+        command: ["sh", "-c", "chown -R 999:999 /var/lib/postgresql/data && chmod -R 700 /var/lib/postgresql/data"]
+        volumeMounts:
+        - mountPath: /var/lib/postgresql/data
+          name: postgres-storage
+          subPath: postgres
+        securityContext:
+          runAsUser: 0
       containers:
       - name: postgres
         image: postgres:16-alpine
@@ -343,7 +353,7 @@ spec:
       containers:
       - name: api
         image: ticketing-api:latest
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
           name: http
@@ -503,7 +513,7 @@ spec:
       containers:
       - name: frontend
         image: ticketing-frontend:latest
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 3000
           name: http
@@ -628,7 +638,7 @@ spec:
       containers:
       - name: worker
         image: ticketing-worker:latest
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         env:
         - name: NODE_ENV
           valueFrom:
