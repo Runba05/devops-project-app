@@ -1,0 +1,125 @@
+---
+# ServiceAccount for API
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-sa
+  namespace: ticketing
+  labels:
+    app: ticketing-platform
+
+---
+# Role for API (read-only database and cache)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: api-role
+  namespace: ticketing
+rules:
+# Allow reading ConfigMaps and Secrets
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["ticketing-config"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["ticketing-credentials"]
+  verbs: ["get"]
+
+---
+# RoleBinding for API
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: api-rolebinding
+  namespace: ticketing
+subjects:
+- kind: ServiceAccount
+  name: api-sa
+  namespace: ticketing
+roleRef:
+  kind: Role
+  name: api-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ServiceAccount for Frontend
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frontend-sa
+  namespace: ticketing
+  labels:
+    app: ticketing-platform
+
+---
+# Role for Frontend (read ConfigMaps)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: frontend-role
+  namespace: ticketing
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["ticketing-config"]
+  verbs: ["get"]
+
+---
+# RoleBinding for Frontend
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: frontend-rolebinding
+  namespace: ticketing
+subjects:
+- kind: ServiceAccount
+  name: frontend-sa
+  namespace: ticketing
+roleRef:
+  kind: Role
+  name: frontend-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ServiceAccount for Worker
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: worker-sa
+  namespace: ticketing
+  labels:
+    app: ticketing-platform
+
+---
+# Role for Worker (read-only database and cache)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: worker-role
+  namespace: ticketing
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["ticketing-config"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["ticketing-credentials"]
+  verbs: ["get"]
+
+---
+# RoleBinding for Worker
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: worker-rolebinding
+  namespace: ticketing
+subjects:
+- kind: ServiceAccount
+  name: worker-sa
+  namespace: ticketing
+roleRef:
+  kind: Role
+  name: worker-role
+  apiGroup: rbac.authorization.k8s.io
